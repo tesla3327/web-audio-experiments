@@ -9,19 +9,19 @@ let offlineCtx;
 let loaded = false;
 
 audioTag.src = url;
+audioTag.volume = 0.3;
 audioTag.addEventListener('canplaythrough', () => {
   if (!loaded) {
     loaded = true;
     const seconds = Math.round(audioTag.duration);
+    audioTag.src = '';
     
     offlineCtx = new OfflineAudioContext(2, seconds * sampleRate, sampleRate);
     
     fetch(url)
       .then(resp => resp.arrayBuffer())
       .then(buffer => offlineCtx.decodeAudioData(buffer))
-      .then(filterAudio)
-      .then(removeChunkOfSamples)
-      // .then(playAudio);
+      .then(insertWhiteNoise)
       .then(connectToAudioTag);
   }
 });
@@ -54,22 +54,60 @@ const removeLeftChannel = buffer => {
   return Promise.resolve(buffer);
 };
 
-const removeChunkOfSamples = buffer => {
-  const samples = [buffer.getChannelData(0), buffer.getChannelData(1)];
+const generateWhiteNoise = length => {
+  const data = new Float32Array(length);
 
-  let mute = false;
-  let offsetForward = 0;
-  for (let i = 0; i < buffer.length; i++) {
-    if (i % sampleRate === 0) {
-      offsetForward += sampleRate;
-      mute = !mute;
-    }
-
-    samples[0][i] = samples[0][i + offsetForward];
-    samples[1][i] = samples[1][i + offsetForward];
+  for (let i = 0; i < length; i++) {
+    data[i] = (Math.random() * 2.0) - 1.0;
   }
 
-  return Promise.resolve(buffer);
+  return data;
+};
+
+const insertWhiteNoise = buffer => {
+  const t0 = performance.now();
+
+  const data = [buffer.getChannelData(0), buffer.getChannelData(1)];
+  const newData = [
+    new Float32Array(buffer.length),
+    new Float32Array(buffer.length)
+  ];
+
+  let oldPos = 0;
+  let newPos = 0;
+  const whiteNoise = generateWhiteNoise(sampleRate / 10);
+  while (oldPos < buffer.length) {
+    // Every second we skip forward a full second
+    if (oldPos % sampleRate === 0 && (oldPos + sampleRate) < newData[0].length) {
+      oldPos += sampleRate;
+
+      // Add in whitenoise
+      newData[0].set(whiteNoise, newPos);
+      newData[1].set(whiteNoise, newPos);
+
+      newPos += sampleRate / 10;
+    }
+
+    newData[0][newPos] = data[0][oldPos];
+    newData[1][newPos] = data[1][oldPos];
+
+    oldPos++;
+    newPos++;
+  }
+
+  const newBuffer = new AudioBuffer({
+    length: buffer.length,
+    numberOfChannels: buffer.numberOfChannels,
+    sampleRate: buffer.sampleRate
+  });
+
+  newBuffer.copyToChannel(newData[0], 0);
+  newBuffer.copyToChannel(newData[1], 1);
+
+  const t1 = performance.now();
+  console.log('Timing:', t1 - t0);
+
+  return Promise.resolve(newBuffer);
 };
 
 const playAudio = buffer => {
