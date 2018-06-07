@@ -1,32 +1,114 @@
 import Wav from './wav.js';
 
+const Peaks = peaks;
+
 const sampleRate = 44100;
-const audioTag = audio;
-const url = "./sandstorm.mp3";
-// const url = "./speaker-6.wav";
+const channels = 1;
+const url = "./marriage.wav";
+// const url = './wolverine.mp3';
 
 let offlineCtx;
 let loaded = false;
+let modifiedWaveform;
+let waveformPoints = [];
 
-audioTag.src = url;
-audioTag.volume = 0.3;
-audioTag.addEventListener('canplaythrough', () => {
+let chunkSize = 1024;
+// Number of chunks in a row that need to be below threshold for it to trigger
+let triggerLength = 10;
+// Number of chunks to close the gate for once it's triggered
+let holdLength = 10;
+let threshold = 0.003;
+
+let averageVolume = 0;
+let rmsChunks;
+
+let audioBuffer;
+
+const chunkSizeInput = document.querySelector('#chunkSize');
+const holdLengthInput = document.querySelector('#holdLength');
+const triggerLengthInput = document.querySelector('#triggerLength');
+const thresholdInput = document.querySelector('#threshold');
+const averageVolumeSpan = document.querySelector('#averageVolume');
+
+const updateForm = () => {
+  chunkSizeInput.value = chunkSize;
+  thresholdInput.value = threshold;
+  triggerLengthInput.value = triggerLength;
+  holdLengthInput.value = holdLength;
+  averageVolumeSpan.textContent = averageVolume;
+};
+
+const getValuesFromForm = () => {
+  try {
+    chunkSize = parseFloat(chunkSizeInput.value);
+    threshold = parseFloat(thresholdInput.value);
+    holdLength = parseFloat(holdLengthInput.value);
+    triggerLength = parseFloat(triggerLengthInput.value);
+  } catch {
+    console.log('Invalid parameters');
+  }
+};
+
+const process = (dryRun) => {
+  getValuesFromForm();
+  extractChannelData(gateRemove(dryRun))(audioBuffer)
+    .then(connectToAudioTag);
+};
+
+document.querySelector('#process').onclick = () => process(false);
+
+document.querySelector('#dryRun').onclick = () => process(true);
+
+originalAudio.src = url;
+originalAudio.addEventListener('canplaythrough', () => {
   if (!loaded) {
     loaded = true;
-    const seconds = Math.round(audioTag.duration);
-    audioTag.src = '';
+    const seconds = Math.round(originalAudio.duration);
     
-    offlineCtx = new OfflineAudioContext(2, seconds * sampleRate, sampleRate);
-    
+    offlineCtx = new OfflineAudioContext(channels, seconds * sampleRate, sampleRate);
+
     fetch(url)
       .then(resp => resp.arrayBuffer())
       .then(buffer => offlineCtx.decodeAudioData(buffer))
-      // .then(calculateRMS)
-      .then(gateWithWhiteNoise)
-      // .then(insertWhiteNoise)
+      .then(filterAudio)
+      .then(getAverageRMS)
+      .then(extractChannelData(limitAudio))
+      .then(buffer => {
+        audioBuffer = buffer;
+        return Promise.resolve(buffer);
+      })
       .then(connectToAudioTag);
   }
 });
+
+const setupModifiedWaveform = () => {
+  console.log('setting up');
+  const context = new AudioContext();
+
+  modifiedWaveform = Peaks.init({
+    container: document.querySelector('#modifiedWaveform'),
+    mediaElement: document.querySelector('#modifiedAudio'),
+    audioContext: context
+  });
+  
+  modifiedWaveform.points.add(waveformPoints);
+
+  setTimeout(() => {
+      document
+        .querySelectorAll('.overview-container')
+        .forEach(element => element.remove());
+      modifiedAudio.removeEventListener('canplaythrough', setupModifiedWaveform);
+    },
+    200
+  );
+};
+
+const addPoint = (samplePosition, label) => {
+  waveformPoints.push({
+    time: samplePosition / 44100,
+    labelText: label
+  });
+};
 
 const filterAudio = data => {
   const source = offlineCtx.createBufferSource();
@@ -48,6 +130,31 @@ const filterAudio = data => {
 
   source.start();
   return offlineCtx.startRendering();
+};
+
+const limitAudio = (data, newData) => {
+  if (!rmsChunks) {
+    return;
+  }
+
+  const maxValue = rmsChunks.reduce((prev, next) => Math.max(Math.abs(prev), Math.abs(next)), 0.0);
+  const scalingFactor = (1 / maxValue) * 0.5;
+
+  console.log('Max:', maxValue);
+  console.log('Scaling:', scalingFactor);
+
+  let clipping = 0;
+  for (let i = 0; i < newData.length; i++) {
+    for (let j = 0; j < newData[0].length; j++) {
+      newData[i][j] = Math.min(data[i][j] * scalingFactor, 1);
+
+      if (newData[i][j] === 1) {
+        clipping++;
+      }
+    }
+  }
+
+  console.log('Clipping:', clipping);
 };
 
 const removeLeftChannel = buffer => {
@@ -91,22 +198,132 @@ const getRMSChunks = (buffer, chunkSize=1024) => {
   return rmsChunks;
 };
 
+const extractChannelData = process => buffer => {
+  // Extract raw samples from buffer
+  const { numberOfChannels, length, sampleRate } = buffer;
+  // Define arrays so we can hold multiple channels
+  const data = [];
+  const newData = [];
+
+  for (let i = 0; i < numberOfChannels; i++) {
+    data.push(buffer.getChannelData(i));
+    newData.push(new Float32Array(buffer.length));
+  }
+
+  // Process the samples (mutates newData)
+  const t0 = performance.now();
+  process(data, newData);
+  const t1 = performance.now();
+  const roundedTelemetry = Math.round((t1 - t0) * 10) / 10;
+
+  // Create new buffer from new samples
+  const newBuffer = new AudioBuffer({
+    length,
+    numberOfChannels,
+    sampleRate
+  });
+
+  for (let i = 0; i < numberOfChannels; i++) {
+    newBuffer.copyToChannel(newData[i], i);
+  }
+
+  console.log(`Processed (${process.name}) in: ${roundedTelemetry}ms`);
+  return Promise.resolve(newBuffer);
+};
+
+const getAverageRMS = buffer => {
+  rmsChunks = getRMSChunks(buffer.getChannelData(0), chunkSize);
+  averageVolume = rmsChunks.reduce((prev, next) => prev + next, 0) / rmsChunks.length;
+
+  updateForm();
+
+  return Promise.resolve(buffer);
+};
+
+/**
+ * Remove samples when the level drops below a threshold
+ * @param {Float32Array} buffer 
+ */
+const gateRemove = dryRun => (data, newData) => {
+  console.log(dryRun);
+  const silence = (new Float32Array(chunkSize)).fill(0);
+  const rmsChunks = getRMSChunks(data[0], chunkSize);
+
+  waveformPoints = [];
+
+  const totalAverage = rmsChunks.reduce((prev, next) => prev + next, 0) / rmsChunks.length;
+  console.log("Total track RMS: ", totalAverage);
+
+  let pos = 0;
+  let oldPos = 0;
+  let chunkPos = 0;
+  let belowThresholdChunks = 0;
+  let trigger;
+  let prevTrigger;
+
+  while (chunkPos < rmsChunks.length - holdLength) {
+    const chunk = rmsChunks[chunkPos];
+    if (chunk < threshold) {
+      belowThresholdChunks++;
+    } else {
+      belowThresholdChunks = 0;
+    }
+  
+    // Check if we trigger the noise gate closed
+    prevTrigger = trigger;
+    trigger = belowThresholdChunks >= triggerLength;
+
+
+    if (dryRun) {
+      if (trigger && !prevTrigger) {
+        addPoint(oldPos, 'Close');
+      } else if (!trigger && prevTrigger) {
+        addPoint(oldPos, 'Open');
+      }
+    }
+
+    if (trigger) {
+      for (let i = 0; i < holdLength; i++) {
+        if (dryRun) {
+          newData[0].set(data[0].slice(oldPos, oldPos + chunkSize), pos);
+          pos += chunkSize;
+          oldPos += chunkSize;
+          chunkPos++;
+        } else {
+          oldPos += chunkSize;
+          chunkPos++;
+        }
+      }
+    } else {
+      newData[0].set(data[0].slice(oldPos, oldPos + chunkSize), pos);
+      pos += chunkSize;
+      oldPos += chunkSize;
+      chunkPos++;
+    }
+  }
+
+  const samplesSkipped = oldPos - pos;
+  console.log(`Samples removed: ${samplesSkipped} (${samplesSkipped / 44100}s)`);
+};
+
 const gateWithWhiteNoise = buffer => {
   const t0 = performance.now();
 
-  const data = [buffer.getChannelData(0), buffer.getChannelData(1)];
+  // const data = [buffer.getChannelData(0), buffer.getChannelData(1)];
+  const data = [buffer.getChannelData(0)];
   const newData = [
     new Float32Array(buffer.length),
     new Float32Array(buffer.length)
   ];
 
   // Insert whitenoise when the level drops below a threshold level
-  const threshold = 0.15;
+  const threshold = 0.015;
   const chunkSize = 1024;
   // Number of chunks in a row that need to be below threshold for it to trigger
   const triggerLength = 10;
   // Number of chunks to close the gate for once it's triggered
   const holdLength = 10;
+
   const silence = (new Float32Array(chunkSize)).fill(0);
   const rmsChunks = getRMSChunks(data[0], chunkSize);
 
@@ -136,13 +353,13 @@ const gateWithWhiteNoise = buffer => {
       for (let i = 0; i < holdLength; i++) {
         const whiteNoise = generateWhiteNoise(chunkSize);
         newData[0].set(whiteNoise, pos);
-        newData[1].set(whiteNoise, pos);
+        // newData[1].set(whiteNoise, pos);
         pos += chunkSize;
         chunkPos++;
       }
     } else {
       newData[0].set(data[0].slice(pos, pos + chunkSize), pos);
-      newData[1].set(data[1].slice(pos, pos + chunkSize), pos);
+      // newData[1].set(data[1].slice(pos, pos + chunkSize), pos);
       pos += chunkSize;
       chunkPos++;
     }
@@ -155,13 +372,88 @@ const gateWithWhiteNoise = buffer => {
   });
 
   newBuffer.copyToChannel(newData[0], 0);
-  newBuffer.copyToChannel(newData[1], 1);
+  // newBuffer.copyToChannel(newData[1], 1);
 
   const t1 = performance.now();
   console.log('Processed (Gate) in:', t1 - t0);
 
   return Promise.resolve(newBuffer);
 };
+
+// const gateRemove = buffer => {
+//   const t0 = performance.now();
+
+//   // const data = [buffer.getChannelData(0), buffer.getChannelData(1)];
+//   const data = [buffer.getChannelData(0)];
+//   const newData = [
+//     new Float32Array(buffer.length),
+//     new Float32Array(buffer.length)
+//   ];
+
+//   // Insert whitenoise when the level drops below a threshold level
+//   const threshold = 0.004;
+//   const chunkSize = 1024;
+//   // Number of chunks in a row that need to be below threshold for it to trigger
+//   const triggerLength = 10;
+//   // Number of chunks to close the gate for once it's triggered
+//   const holdLength = 10;
+//   const silence = (new Float32Array(chunkSize)).fill(0);
+//   const rmsChunks = getRMSChunks(data[0], chunkSize);
+
+//   const totalAverage = rmsChunks.reduce((prev, next) => prev + next, 0) / rmsChunks.length;
+//   console.log("Total track RMS: ", totalAverage);
+
+//   let pos = 0;
+//   let oldPos = 0;
+//   let chunkPos = 0;
+//   let trigger;
+
+//   while (chunkPos < rmsChunks.length - holdLength) {
+//     trigger = false;
+//     const chunk = rmsChunks[chunkPos];
+  
+//     // Check if we trigger the noise gate closed
+//     if (chunk < threshold) {
+//       trigger = true;
+//       // Check if the next several chunks also fall below threshold
+//       for (let i = 1; i <= triggerLength; i++) {
+//         if (rmsChunks[chunkPos + i] >= threshold) {
+//           trigger = false;
+//         }
+//       }
+//     }
+
+//     if (trigger) {
+//       for (let i = 0; i < holdLength; i++) {
+//         // const whiteNoise = generateWhiteNoise(chunkSize);
+//         // newData[0].set(silence, pos);
+//         // pos += chunkSize;
+//         oldPos += chunkSize;
+//         chunkPos++;
+//       }
+//     } else {
+//       newData[0].set(data[0].slice(oldPos, oldPos + chunkSize), pos);
+//       // newData[1].set(data[1].slice(pos, pos + chunkSize), pos);
+//       pos += chunkSize;
+//       oldPos += chunkSize;
+//       chunkPos++;
+//     }
+//   }
+
+//   const newBuffer = new AudioBuffer({
+//     length: buffer.length,
+//     numberOfChannels: buffer.numberOfChannels,
+//     sampleRate: buffer.sampleRate
+//   });
+
+//   newBuffer.copyToChannel(newData[0], 0);
+//   // newBuffer.copyToChannel(newData[1], 1);
+
+//   const t1 = performance.now();
+//   console.log('Processed (GateRemove) in:', t1 - t0);
+
+//   return Promise.resolve(newBuffer);
+// };
 
 const calculateRMS = buffer => {
   const rmsChunks = getRMSChunks(buffer.getChannelData(0));
@@ -241,7 +533,8 @@ const connectToAudioTag = buffer => {;
   }
 
   const blob = new Blob(srclist, { type: 'audio/wav' });
-  audioTag.src = URL.createObjectURL(blob);
+  modifiedAudio.src = URL.createObjectURL(blob);
+  modifiedAudio.addEventListener('canplaythrough', setupModifiedWaveform);
 };
 
 const processFromAudioTag = tag => {

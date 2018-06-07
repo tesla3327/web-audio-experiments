@@ -2,10 +2,25 @@
 <html>
 
 <head>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/peaks.js/0.9.9/peaks.js"></script>
   <script type="module" src="./main.js"></script>
   <style>
     audio {
+      padding: 15px;
       width: 1000px;
+    }
+
+    input {
+      margin-left: 10px;
+    }
+
+    label {
+      padding: 5px;
+    }
+
+    #controls {
+      display: flex;
+      flex-direction: column;
     }
   </style>
 </head>
@@ -13,7 +28,35 @@
 <body>
   <h1>Web Audio Experiments</h1>
   <span id="current"></span>
-  <audio id="audio" controls></audio>
+  <h2>Original</h2>
+  <audio id="originalAudio" controls></audio>
+  <h2>Modified</h2>
+  <div id="controls">
+    <label>
+      Threshold (0 - 1.0)
+      <input id="threshold"></input>
+    </label>
+    <label>
+      Chunk Size (number of samples)
+      <input id="chunkSize"></input>
+    </label>
+    <label>
+      Hold Length (number of chunks)
+      <input id="holdLength"></input>
+    </label>
+    <label>
+      Trigger Length (number of chunks)
+      <input id="triggerLength"></input>
+    </label>
+    <label>
+      Average volume:
+      <span id="averageVolume"></span>
+    </label>
+  </div>
+  <button id="dryRun">Dry Run</button>
+  <button id="process">Process</button>
+  <audio id="modifiedAudio" controls></audio>
+  <div id="modifiedWaveform"></div>
 </body>
 
 </html>
