@@ -4,8 +4,8 @@ const Peaks = peaks;
 
 const sampleRate = 44100;
 const channels = 1;
-const url = "./marriage.wav";
-// const url = './wolverine.mp3';
+// const url = "./marriage.wav";
+const url = './wolverine.mp3';
 
 let offlineCtx;
 let loaded = false;
@@ -18,6 +18,8 @@ let triggerLength = 10;
 // Number of chunks to close the gate for once it's triggered
 let holdLength = 10;
 let threshold = 0.003;
+let minSectionSamples = 20;
+let cleanSignal = 3;
 
 let averageVolume = 0;
 let rmsChunks;
@@ -28,6 +30,8 @@ const chunkSizeInput = document.querySelector('#chunkSize');
 const holdLengthInput = document.querySelector('#holdLength');
 const triggerLengthInput = document.querySelector('#triggerLength');
 const thresholdInput = document.querySelector('#threshold');
+const cleanSignalInput = document.querySelector('#cleanSignal');
+const minSectionSamplesInput = document.querySelector('#minSectionSamples');
 const averageVolumeSpan = document.querySelector('#averageVolume');
 
 const updateForm = () => {
@@ -35,6 +39,8 @@ const updateForm = () => {
   thresholdInput.value = threshold;
   triggerLengthInput.value = triggerLength;
   holdLengthInput.value = holdLength;
+  minSectionSamplesInput.value = minSectionSamples;
+  cleanSignalInput.value = cleanSignal;
   averageVolumeSpan.textContent = averageVolume;
 };
 
@@ -43,6 +49,8 @@ const getValuesFromForm = () => {
     chunkSize = parseFloat(chunkSizeInput.value);
     threshold = parseFloat(thresholdInput.value);
     holdLength = parseFloat(holdLengthInput.value);
+    minSectionSamples = parseFloat(minSectionSamplesInput.value);
+    cleanSignal = parseFloat(cleanSignalInput.value);
     triggerLength = parseFloat(triggerLengthInput.value);
   } catch {
     console.log('Invalid parameters');
@@ -51,7 +59,7 @@ const getValuesFromForm = () => {
 
 const process = (dryRun) => {
   getValuesFromForm();
-  extractChannelData(gateRemove(dryRun))(audioBuffer)
+  extractChannelData(detectBreaks(dryRun))(audioBuffer)
     .then(connectToAudioTag);
 };
 
@@ -72,7 +80,6 @@ originalAudio.addEventListener('canplaythrough', () => {
       .then(buffer => offlineCtx.decodeAudioData(buffer))
       .then(filterAudio)
       .then(getAverageRMS)
-      .then(extractChannelData(limitAudio))
       .then(buffer => {
         audioBuffer = buffer;
         return Promise.resolve(buffer);
@@ -238,6 +245,64 @@ const getAverageRMS = buffer => {
   updateForm();
 
   return Promise.resolve(buffer);
+};
+
+/**
+ * Remove samples when the level drops below a threshold
+ * @param {Float32Array} buffer 
+ */
+const detectBreaks = dryRun => (data, newData) => {
+  let pos = 0;
+
+  // Average rms
+  // const rmsWindow = 50;
+  // pos = 5;
+  // while (pos < newData[0].length) {
+  //   let sum = 0;
+  //   for (let i = 1; i <= rmsWindow; i++) {
+  //     sum += data[0][pos - i];
+  //     sum += data[0][pos + i];
+  //   }
+
+  //   newData[0][pos] = sum / (rmsWindow * 2);
+  //   pos++;
+  // }
+  
+  pos = 0;
+  while (pos < data[0].length) {
+    newData[0][pos] = Math.abs(data[0][pos]) < threshold
+      ? 0
+      : data[0][pos] * 5;
+    pos++;
+  }
+
+  // Remove sections that are too short
+  pos = 0;
+  let sectionStart = 0;
+  let sectionLength = 0;
+  let inSection = false;
+  while (pos < newData[0].length) {
+    if (newData[0][pos] > 0) {
+      sectionLength++;
+
+      if (!inSection) {
+        inSection = true;
+        sectionStart = pos;
+      }
+    } else {
+      if (inSection && sectionLength < minSectionSamples) {
+        for (let i = sectionStart; i < pos; i++) {
+          newData[0][i] = 0;
+        }
+      }
+
+      inSection = false;
+      sectionLength = 0;
+    }
+
+    pos++;
+  }
+
 };
 
 /**
